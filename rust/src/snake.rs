@@ -1,6 +1,8 @@
 //! Snake game core. Must match python/snake.py exactly (same RNG, rules and state text)
 //! so both runners feed Laya identical input and decisions can be compared step by step.
 
+use std::collections::HashSet;
+
 pub const ORDER: [&str; 4] = ["up", "down", "left", "right"];
 
 fn delta(d: &str) -> (i32, i32) {
@@ -36,15 +38,15 @@ impl Cell {
 }
 
 /// Tiny reproducible RNG; the Python side uses the same algorithm.
-struct XorShift32(u32);
+pub struct XorShift32(u32);
 
 impl XorShift32 {
-    fn new(seed: u64) -> Self {
+    pub fn new(seed: u64) -> Self {
         let s = (seed & 0xFFFF_FFFF) as u32;
         Self(if s == 0 { 1 } else { s })
     }
 
-    fn next(&mut self) -> u32 {
+    pub fn next(&mut self) -> u32 {
         let mut s = self.0;
         s ^= s << 13;
         s ^= s >> 17;
@@ -66,10 +68,14 @@ pub struct Game {
     pub alive: bool,
     pub death: Option<&'static str>,
     pub food: Option<(i32, i32)>,
+    detect_loops: bool,
+    seen: HashSet<(Vec<(i32, i32)>, Option<(i32, i32)>)>,
 }
 
 impl Game {
-    pub fn new(size: i32, seed: u64) -> Self {
+    /// detect_loops: end the game as "loop" when a state repeats. Only valid for a deterministic
+    /// player, which would then repeat the same moves forever.
+    pub fn new(size: i32, seed: u64, detect_loops: bool) -> Self {
         let c = size / 2;
         let mut g = Self {
             size,
@@ -82,9 +88,16 @@ impl Game {
             alive: true,
             death: None,
             food: None,
+            detect_loops,
+            seen: HashSet::new(),
         };
         g.food = g.place_food();
+        g.seen.insert(g.key());
         g
+    }
+
+    fn key(&self) -> (Vec<(i32, i32)>, Option<(i32, i32)>) {
+        (self.body.clone(), self.food)
     }
 
     fn place_food(&mut self) -> Option<(i32, i32)> {
@@ -147,15 +160,25 @@ impl Game {
             if self.food.is_none() {
                 self.alive = false;
                 self.death = Some("win");
+                return;
             }
+            // The snake is longer now, so earlier states can never come back
+            self.seen.clear();
         } else {
             self.body.pop();
             self.hunger += 1;
             if self.hunger > (self.size * self.size * 2) as u32 {
                 self.alive = false;
                 self.death = Some("starved");
+                return;
             }
         }
+        let key = self.key();
+        if self.detect_loops && self.seen.contains(&key) {
+            self.alive = false;
+            self.death = Some("loop");
+        }
+        self.seen.insert(key);
     }
 }
 
@@ -236,6 +259,24 @@ pub fn move_options(
             (d, text)
         })
         .collect()
+}
+
+/// Draw a move from Laya's probabilities (listed in ORDER). Mirrors sample_move() in python/snake.py.
+///
+/// Probabilities are rounded to 4 decimals first, the precision both runners report, so Python and
+/// Rust draw the same move from the same numbers.
+pub fn sample_move(rng: &mut XorShift32, probs: &[f32]) -> &'static str {
+    let p: Vec<f64> = probs.iter().map(|&v| (v as f64 * 10000.0 + 0.5).floor() / 10000.0).collect();
+    let target = rng.next() as f64 / 4294967296.0 * p.iter().sum::<f64>();
+    let mut acc = 0.0;
+    for (d, v) in ORDER.iter().zip(&p) {
+        acc += v;
+        if target < acc {
+            return d;
+        }
+    }
+    let best = (0..ORDER.len()).fold(0, |b, i| if probs[i] > probs[b] { i } else { b });
+    ORDER[best]
 }
 
 /// Baseline: among safe moves pick the one closest to the food; ties follow ORDER.

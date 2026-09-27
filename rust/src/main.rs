@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use coreml_laya::CoreMLLaya;
 use laya::{Answer, CoreMLConfig, Laya, Predict, Question};
 use objc2_core_ml::MLComputeUnits;
-use snake::{Game, ORDER, move_options, render, rule_move, state_text};
+use snake::{Game, ORDER, XorShift32, move_options, render, rule_move, sample_move, state_text};
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Backend {
@@ -108,6 +108,9 @@ struct Args {
     /// Add each move's outcome to its option text
     #[arg(long)]
     hints: bool,
+    /// Draw each move from Laya's probabilities instead of taking the top one
+    #[arg(long)]
+    sample: bool,
     /// Untimed inferences before measuring
     #[arg(long, default_value_t = 3)]
     warmup: u32,
@@ -132,7 +135,7 @@ fn root() -> PathBuf {
 
 enum Decider {
     /// The question is rebuilt every step from `base` (see snake::move_options)
-    Laya { model: Box<dyn Predict>, id: String, base: Value, safe: bool, hints: bool },
+    Laya { model: Box<dyn Predict>, id: String, base: Value, safe: bool, hints: bool, sample: Option<XorShift32> },
     Rule,
 }
 
@@ -151,11 +154,23 @@ fn to_move(answers: &[Answer]) -> Result<(&'static str, Option<Vec<f32>>)> {
 }
 
 impl Decider {
+    /// Deterministic players repeat themselves forever once a state repeats, so the game can stop them.
+    fn deterministic(&self) -> bool {
+        !matches!(self, Decider::Laya { sample: Some(_), .. })
+    }
+
+    fn new_episode(&mut self, seed: u64) {
+        if let Decider::Laya { sample: Some(rng), .. } = self {
+            // Separate stream from the game's food RNG
+            *rng = XorShift32::new((seed & 0xFFFF_FFFF) ^ 0x5EED_5EED);
+        }
+    }
+
     /// Returns the move and, for Laya, its probabilities in ORDER.
     fn decide(&mut self, g: &Game) -> Result<(&'static str, Option<Vec<f32>>)> {
         match self {
             Decider::Rule => Ok((rule_move(g), None)),
-            Decider::Laya { model, id, base, safe, hints } => {
+            Decider::Laya { model, id, base, safe, hints, sample } => {
                 let options = move_options(
                     g,
                     |d| base["criteria"][d].as_str().unwrap_or_default().to_string(),
@@ -169,7 +184,11 @@ impl Decider {
                 }
                 let mut q = base.clone();
                 q["criteria"] = Value::Object(options.into_iter().map(|(d, t)| (d.to_string(), Value::String(t))).collect());
-                to_move(&model.predict(&state_text(g), &[Question::from_json(id, &q)?])?)
+                let (mv, probs) = to_move(&model.predict(&state_text(g), &[Question::from_json(id, &q)?])?)?;
+                match (sample, &probs) {
+                    (Some(rng), Some(p)) => Ok((sample_move(rng, p), probs)),
+                    _ => Ok((mv, probs)),
+                }
             }
         }
     }
@@ -187,13 +206,19 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
         .context("question.json must be an object with one question")?;
     // Validate the file up front instead of on the first move
     Question::from_json(id, base)?;
-    let suffix = format!("{}{}", if args.safe { "+safe" } else { "" }, if args.hints { "+hints" } else { "" });
+    let suffix = format!(
+        "{}{}{}",
+        if args.safe { "+safe" } else { "" },
+        if args.hints { "+hints" } else { "" },
+        if args.sample { "+sample" } else { "" }
+    );
     let laya = |model: Box<dyn Predict>| Decider::Laya {
         model,
         id: id.clone(),
         base: base.clone(),
         safe: args.safe,
         hints: args.hints,
+        sample: args.sample.then(|| XorShift32::new(0)),
     };
     if args.backend == Backend::Coreml {
         let model = CoreMLLaya::load(&root.join("models/coreml"), args.coreml_units.to_coreml())?;
@@ -264,7 +289,8 @@ fn main() -> Result<()> {
     let (mut decider, name) = build_decider(&args)?;
     let load_s = t0.elapsed().as_secs_f64();
 
-    let warm = Game::new(args.size, args.seed);
+    let warm = Game::new(args.size, args.seed, false);
+    decider.new_episode(args.seed);
     for _ in 0..args.warmup {
         decider.decide(&warm)?;
     }
@@ -278,7 +304,8 @@ fn main() -> Result<()> {
     let mut deaths: BTreeMap<&str, u32> = BTreeMap::new();
 
     for ep in 0..args.episodes {
-        let mut g = Game::new(args.size, args.seed + ep as u64);
+        let mut g = Game::new(args.size, args.seed + ep as u64, decider.deterministic());
+        decider.new_episode(args.seed + ep as u64);
         while g.alive && g.steps < args.max_steps {
             let t = Instant::now();
             let (mv, probs) = decider.decide(&g)?;

@@ -29,7 +29,9 @@ class XorShift32:
 
 
 class Game:
-    def __init__(self, size: int = 10, seed: int = 42):
+    def __init__(self, size: int = 10, seed: int = 42, detect_loops: bool = False):
+        """detect_loops: end the game as "loop" when a state repeats. Only valid for a deterministic
+        player, which would then repeat the same moves forever."""
         self.size = size
         self.rng = XorShift32(seed)
         c = size // 2
@@ -41,6 +43,11 @@ class Game:
         self.alive = True
         self.death = None
         self.food = self._place_food()
+        self.detect_loops = detect_loops
+        self.seen = {self._key()}
+
+    def _key(self):
+        return tuple(self.body), self.food
 
     def _place_food(self):
         occupied = set(self.body)
@@ -80,12 +87,21 @@ class Game:
             if self.food is None:
                 self.alive = False
                 self.death = "win"
+                return
+            # The snake is longer now, so earlier states can never come back
+            self.seen.clear()
         else:
             self.body.pop()
             self.hunger += 1
             if self.hunger > self.size * self.size * 2:
                 self.alive = False
                 self.death = "starved"
+                return
+        key = self._key()
+        if self.detect_loops and key in self.seen:
+            self.alive = False
+            self.death = "loop"
+        self.seen.add(key)
 
 
 def _offset(n: int, pos: str, neg: str, same: str) -> str:
@@ -140,6 +156,22 @@ def move_question(g: Game, base: dict, safe: bool = False, hints: bool = False) 
             text = "%s; %s" % (text, outcome)
         criteria[d] = text
     return dict(base, criteria=criteria)
+
+
+def sample_move(rng: XorShift32, probs: dict) -> str:
+    """Draw a move from Laya's probabilities (listed in ORDER). Mirrors sample_move in rust/src/snake.rs.
+
+    Probabilities are rounded to 4 decimals first, the precision both runners report, so Python and
+    Rust draw the same move from the same numbers.
+    """
+    p = [math.floor(probs[d] * 10000 + 0.5) / 10000 for d in ORDER]
+    target = rng.next() / 4294967296.0 * sum(p)
+    acc = 0.0
+    for d, v in zip(ORDER, p):
+        acc += v
+        if target < acc:
+            return d
+    return max(ORDER, key=lambda d: probs[d])
 
 
 def rule_move(g: Game) -> str:

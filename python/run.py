@@ -22,7 +22,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from snake import ORDER, Game, move_question, render, rule_move, state_text  # noqa: E402
+from snake import ORDER, Game, XorShift32, move_question, render, rule_move, sample_move, state_text  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -45,11 +45,18 @@ def local_model_dir() -> str:
 class LayaDecider:
     """Asks Laya for the next move. The question is rebuilt every step (see snake.move_question)."""
 
-    def __init__(self, answer, questions: dict, safe: bool = False, hints: bool = False):
+    def __init__(self, answer, questions: dict, safe: bool = False, hints: bool = False, sample: bool = False):
         self.answer = answer  # (state, questions) -> {qid: answer}
         self.qid, self.base = next(iter(questions.items()))
         self.safe = safe
         self.hints = hints
+        self.sample = sample
+        self.deterministic = not sample
+        self.rng = None
+
+    def new_episode(self, seed: int):
+        # Separate stream from the game's food RNG
+        self.rng = XorShift32(seed ^ 0x5EED5EED)
 
     def decide(self, g: Game):
         q = move_question(g, self.base, self.safe, self.hints)
@@ -58,7 +65,8 @@ class LayaDecider:
             only = next(iter(q["criteria"]))
             return only, {d: float(d == only) for d in ORDER}
         ans = self.answer(state_text(g), {self.qid: q})[self.qid]
-        return ans["choice"], {d: ans["probabilities"].get(d, 0.0) for d in ORDER}
+        probs = {d: ans["probabilities"].get(d, 0.0) for d in ORDER}
+        return (sample_move(self.rng, probs) if self.sample else ans["choice"]), probs
 
 
 class PaddedSession:
@@ -91,6 +99,11 @@ class PaddedSession:
 
 
 class RuleDecider:
+    deterministic = True
+
+    def new_episode(self, seed: int):
+        pass
+
     def decide(self, g: Game):
         return rule_move(g), None
 
@@ -99,12 +112,12 @@ def build_decider(args):
     """Return (decider, display name)."""
     if args.backend == "rule":
         return RuleDecider(), "rule"
-    suffix = ("+safe" if args.safe else "") + ("+hints" if args.hints else "")
+    suffix = ("+safe" if args.safe else "") + ("+hints" if args.hints else "") + ("+sample" if args.sample else "")
     if args.backend == "coreml":
         from coreml_laya import CoreMLLaya
 
         model = CoreMLLaya(os.path.join(ROOT, "models", "coreml"), args.coreml_units)
-        return (LayaDecider(model.predict, load_questions(), args.safe, args.hints),
+        return (LayaDecider(model.predict, load_questions(), args.safe, args.hints, args.sample),
                 "coreml-%s(multilingual)%s" % (args.coreml_units, suffix))
 
     import warnings
@@ -120,7 +133,7 @@ def build_decider(args):
 
             torch.set_num_threads(args.threads)
         agent = laya.Agent(model_dir, device=args.device)
-        return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints),
+        return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints, args.sample),
                 "torch-%s%s" % (args.device, suffix))
 
     import onnxruntime as ort
@@ -148,7 +161,7 @@ def build_decider(args):
     seq_dim, marker_dim = shapes["input_ids"][1], shapes["marker_pos"][1]
     if isinstance(seq_dim, int):
         agent.session = PaddedSession(agent.session, seq_dim, marker_dim, agent.tok.pad_token_id)
-    return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints),
+    return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints, args.sample),
             name)
 
 
@@ -197,6 +210,8 @@ def main():
     parser.add_argument("--threads", type=int, default=0, help="CPU threads for inference (0 = library default)")
     parser.add_argument("--safe", action="store_true", help="only offer Laya moves that do not end the game")
     parser.add_argument("--hints", action="store_true", help="add each move's outcome to its option text")
+    parser.add_argument("--sample", action="store_true",
+                        help="draw each move from Laya's probabilities instead of taking the top one")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--size", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
@@ -213,6 +228,7 @@ def main():
     load_s = time.perf_counter() - t0
 
     warm = Game(args.size, args.seed)
+    decider.new_episode(args.seed)
     for _ in range(args.warmup):
         decider.decide(warm)
 
@@ -220,7 +236,8 @@ def main():
     latencies, scores, deaths = [], [], Counter()
 
     for ep in range(args.episodes):
-        g = Game(args.size, args.seed + ep)
+        g = Game(args.size, args.seed + ep, detect_loops=decider.deterministic)
+        decider.new_episode(args.seed + ep)
         while g.alive and g.steps < args.max_steps:
             t = time.perf_counter()
             move, probs = decider.decide(g)
