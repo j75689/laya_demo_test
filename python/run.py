@@ -1,9 +1,10 @@
 """Python runner: snake game driven by Laya decisions.
 
 Backends:
-    torch  official laya.Agent (PyTorch), --device cpu|mps
-    onnx   official laya.ONNXAgent (ONNX Runtime), --provider cpu|coreml
-    rule   rule-based baseline (no model)
+    torch   official laya.Agent (PyTorch), --device cpu|mps
+    onnx    official laya.ONNXAgent (ONNX Runtime), --provider cpu|coreml
+    coreml  pre-compiled Core ML laya-multilingual (models/coreml/, see fetch_coreml.py)
+    rule    rule-based baseline (no model)
 
 Examples:
     python python/run.py --backend onnx --render
@@ -73,6 +74,17 @@ class PaddedSession:
         return self.session.run(output_names, feeds)
 
 
+class CoreMLDecider:
+    def __init__(self, model, questions: dict):
+        self.model = model
+        self.questions = questions
+        self.qid = next(iter(questions))
+
+    def decide(self, g: Game):
+        ans = self.model.predict(state_text(g), self.questions)[self.qid]
+        return ans["choice"], ans["probabilities"]
+
+
 class RuleDecider:
     def decide(self, g: Game):
         return rule_move(g), None
@@ -82,6 +94,12 @@ def build_decider(args):
     """Return (decider, display name)."""
     if args.backend == "rule":
         return RuleDecider(), "rule"
+    if args.backend == "coreml":
+        from coreml_laya import CoreMLLaya
+
+        return (CoreMLDecider(CoreMLLaya(os.path.join(ROOT, "models", "coreml"), args.coreml_units),
+                              load_questions()),
+                "coreml-%s(multilingual)" % args.coreml_units)
 
     import warnings
 
@@ -160,12 +178,13 @@ def fmt_probs(probs):
 
 def main():
     parser = argparse.ArgumentParser(description="Python snake + Laya")
-    parser.add_argument("--backend", choices=["torch", "onnx", "rule"], default="onnx")
+    parser.add_argument("--backend", choices=["torch", "onnx", "coreml", "rule"], default="onnx")
     parser.add_argument("--device", default="cpu", help="torch backend: cpu or mps")
     parser.add_argument("--onnx", default="models/laya.onnx", help="onnx backend: model path, relative to the project root")
     parser.add_argument("--provider", choices=["cpu", "coreml"], default="cpu")
     parser.add_argument("--coreml-units", choices=sorted(COREML_UNITS), default="all",
-                        help="coreml provider: compute units (gpu = CPU+GPU, ane = CPU+Neural Engine)")
+                        help="CoreML compute units for --provider coreml and --backend coreml "
+                             "(gpu = CPU+GPU, ane = CPU+Neural Engine)")
     parser.add_argument("--threads", type=int, default=0, help="CPU threads for inference (0 = library default)")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--size", type=int, default=10)

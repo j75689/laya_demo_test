@@ -1,7 +1,13 @@
 # Laya snake demo: Python vs Rust
 
 A snake game where every move is decided by [Laya](https://github.com/NandhaKishorM/laya),
-run through two runners so they can be compared:
+run through two runners so they can be compared.
+
+**Fastest setup:** the pre-compiled Core ML model from
+[FluidInference/laya-coreml](https://huggingface.co/FluidInference/laya-coreml) (laya-multilingual) runs at about
+12 ms per decision on an M3 from either runner (`--backend coreml`).
+
+The two runners:
 
 - **Python** (`python/run.py`) uses the official `laya` package. It can run on PyTorch (CPU or MPS) or on ONNX Runtime (CPU or CoreML).
 - **Rust** (`rust/`) is a port of Laya's inference that needs no Python. It uses `ort` (ONNX Runtime) and HF `tokenizers`.
@@ -18,10 +24,13 @@ shared/question.json     Laya question used by both runners
 python/snake.py          game engine, state text, rule baseline
 python/run.py            Python runner (torch / onnx / rule backends)
 python/export_onnx.py    checkpoint -> models/laya.onnx (+ tokenizer.json, meta.json for Rust)
+python/fetch_coreml.py   downloads the Core ML model into models/coreml/ (+ --verify against PyTorch)
+python/coreml_laya.py    Laya on the Core ML model via coremltools
 python/compare_traces.py step-by-step diff of two --trace files
 python/bench.py          runs every combination and prints one table
 rust/src/snake.rs        game engine (line-for-line port of snake.py)
-rust/src/laya.rs         Laya inference port (build_sequence, collate, temperature, softmax)
+rust/src/laya.rs         Laya inference port (build_sequence, collate, temperature, softmax) on ONNX Runtime
+rust/src/coreml_laya.rs  same Encoder on Apple's Core ML framework (objc2-core-ml), no ONNX Runtime
 rust/src/main.rs         Rust runner (same flags as run.py)
 ```
 
@@ -34,6 +43,7 @@ python3 -m venv .venv
 # Downloads the ~800 MB checkpoint on first run, then writes models/
 .venv/bin/python python/export_onnx.py          # add --int8 for the quantized model too
 .venv/bin/python python/export_onnx.py --skip-export --static 192   # fixed-shape model for CoreML
+.venv/bin/python python/fetch_coreml.py --verify   # pre-compiled Core ML model (~615 MB)
 
 cd rust && cargo build --release && cd ..
 ```
@@ -50,7 +60,12 @@ It prints `FP32: max logit error 0.00004, same decision 7/7`.
 
 .venv/bin/python python/run.py --backend torch --device mps --render
 
-# Apple GPU / Neural Engine through CoreML (first load compiles for ~1 min, then it is cached)
+# Pre-compiled Core ML model: fastest, ~12 ms per decision
+./rust/target/release/snake-laya --backend coreml --render
+.venv/bin/python python/run.py --backend coreml --render
+
+# English model on Apple GPU / Neural Engine through ONNX Runtime CoreML
+# (first load compiles for ~1 min, then it is cached)
 ./rust/target/release/snake-laya --onnx models/laya.static192.onnx --provider coreml --render
 .venv/bin/python python/run.py --backend onnx --onnx models/laya.static192.onnx --provider coreml --render
 ./rust/target/release/snake-laya --backend rule --render --delay 0.05
@@ -79,13 +94,13 @@ Common flags for both runners:
 | `--trace` | write every decision to a JSONL file |
 | `--json` | print a one-line JSON summary |
 
-The ONNX backends also take:
+The ONNX and Core ML backends also take:
 
 | Flag | Meaning |
 |---|---|
 | `--onnx` | model path |
 | `--provider cpu\|coreml` | execution provider |
-| `--coreml-units all\|gpu\|ane\|cpu` | CoreML compute units |
+| `--coreml-units all\|gpu\|ane\|cpu` | CoreML compute units (`--provider coreml` and `--backend coreml`) |
 
 A static-shape model (`laya.staticN.onnx`) is detected automatically, and inputs are padded to N tokens.
 
@@ -126,7 +141,20 @@ All FP32 backends make identical moves: torch cpu, torch mps, onnx cpu, onnx cor
    With the MLProgram format, CoreML takes 1481 of 1574 nodes and runs at about 150-250 ms per decision, on par with PyTorch MPS. Decisions stay identical, and Rust and Python match step for step.
    The NeuralNetwork format leaves about a third of the graph on CPU and is 3-5x slower.
    Rust sometimes measured faster than Python here, but Python's own overhead is only about 0.7 ms per call. The gap is load noise plus different ONNX Runtime builds (Rust bundles 1.28, pip has 1.30), not the language.
-7. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
+7. **The pre-compiled Core ML model is the real speedup.** FluidInference/laya-coreml converts laya-multilingual (mmBERT-base, 322M) to a fixed-shape Core ML program that runs mostly on the Neural Engine.
+   On the M3 the L256 bucket takes about 12 ms per decision: 11.9 ms from Rust, 12.8 ms from Python. That is about 8x faster than the same checkpoint on PyTorch MPS (101 ms) and about 30x faster than on PyTorch CPU (403 ms).
+   It matches PyTorch laya-multilingual on 40/40 decisions, with a max probability error of 0.008, and the Rust and Python runners agree step for step.
+   Compute units matter:
+
+   | Compute units | p50 per decision |
+   |---|---:|
+   | ALL | 12.6 ms |
+   | CPU + Neural Engine | 14.6 ms |
+   | CPU + GPU | 90 ms |
+   | CPU only | 296 ms |
+
+   It is a different checkpoint from the English model, so its decisions differ from the ONNX rows. It cannot play snake either.
+8. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
 
 ## Notes
 

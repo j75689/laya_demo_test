@@ -60,6 +60,13 @@ def main():
     if not args.skip_coreml:
         plan.append(("laya onnx coreml fp32", py + ["--backend", "onnx", "--provider", "coreml"],
                      rs + ["--provider", "coreml"], "onnx_coreml"))
+    static = "models/laya.static192.onnx"
+    if not args.skip_coreml and os.path.exists(os.path.join(ROOT, static)):
+        plan.append(("laya onnx coreml static192", py + ["--backend", "onnx", "--onnx", static, "--provider", "coreml"],
+                     rs + ["--onnx", static, "--provider", "coreml"], "onnx_coreml_static"))
+    if not args.skip_coreml and os.path.exists(os.path.join(ROOT, "models", "coreml", "meta.json")):
+        plan.append(("laya-multilingual coreml (Fluid)", py + ["--backend", "coreml"],
+                     rs + ["--backend", "coreml"], "coreml_fluid"))
     if not args.skip_int8 and os.path.exists(os.path.join(ROOT, "models", "laya.int8.onnx")):
         plan.append(("laya onnx cpu int8", py + ["--backend", "onnx", "--onnx", "models/laya.int8.onnx"],
                      rs + ["--onnx", "models/laya.int8.onnx"], "onnx_int8"))

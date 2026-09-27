@@ -3,8 +3,10 @@
 //! Examples:
 //!     cargo run --release -- --render
 //!     cargo run --release -- --onnx models/laya.int8.onnx --episodes 5
+//!     cargo run --release -- --backend coreml --render      # pre-compiled Core ML model
 //!     cargo run --release -- --backend rule --render --delay 0.05
 
+mod coreml_laya;
 mod laya;
 mod snake;
 
@@ -18,12 +20,16 @@ use clap::{Parser, ValueEnum};
 use ort::ep::coreml::ComputeUnits;
 use serde_json::{Value, json};
 
-use laya::{CoreMLConfig, Laya, Question};
+use coreml_laya::CoreMLLaya;
+use laya::{Answer, CoreMLConfig, Laya, Question};
+use objc2_core_ml::MLComputeUnits;
 use snake::{Game, ORDER, render, rule_move, state_text};
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Backend {
     Onnx,
+    /// Pre-compiled Core ML laya-multilingual (models/coreml/, see python/fetch_coreml.py)
+    Coreml,
     Rule,
 }
 
@@ -52,6 +58,24 @@ impl Units {
             Units::Cpu => (ComputeUnits::CPUOnly, "CPUOnly"),
         }
     }
+
+    fn to_coreml(self) -> MLComputeUnits {
+        match self {
+            Units::All => MLComputeUnits::All,
+            Units::Gpu => MLComputeUnits::CPUAndGPU,
+            Units::Ane => MLComputeUnits::CPUAndNeuralEngine,
+            Units::Cpu => MLComputeUnits::CPUOnly,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Units::All => "all",
+            Units::Gpu => "gpu",
+            Units::Ane => "ane",
+            Units::Cpu => "cpu",
+        }
+    }
 }
 
 #[derive(Parser)]
@@ -64,7 +88,7 @@ struct Args {
     onnx: String,
     #[arg(long, value_enum, default_value = "cpu")]
     provider: Provider,
-    /// coreml provider: compute units
+    /// CoreML compute units, for --provider coreml and --backend coreml
     #[arg(long, value_enum, default_value = "all")]
     coreml_units: Units,
     /// CPU threads for inference (0 = library default)
@@ -102,7 +126,22 @@ fn root() -> PathBuf {
 
 enum Decider {
     Laya { model: Laya, questions: Vec<Question> },
+    CoreML { model: CoreMLLaya, questions: Vec<Question> },
     Rule,
+}
+
+/// Picks the move from the first answer and lists its probabilities in ORDER.
+fn to_move(answers: &[Answer]) -> Result<(&'static str, Option<Vec<f32>>)> {
+    let a = &answers[0];
+    let mv = ORDER
+        .into_iter()
+        .find(|d| *d == a.choice())
+        .context("model returned an unknown direction")?;
+    let probs = ORDER
+        .iter()
+        .map(|d| a.labels.iter().position(|l| l == d).map_or(0.0, |i| a.probs[i]))
+        .collect();
+    Ok((mv, Some(probs)))
 }
 
 impl Decider {
@@ -110,19 +149,8 @@ impl Decider {
     fn decide(&mut self, g: &Game) -> Result<(&'static str, Option<Vec<f32>>)> {
         match self {
             Decider::Rule => Ok((rule_move(g), None)),
-            Decider::Laya { model, questions } => {
-                let answers = model.predict(&state_text(g), questions)?;
-                let a = &answers[0];
-                let mv = ORDER
-                    .into_iter()
-                    .find(|d| *d == a.choice())
-                    .context("model returned an unknown direction")?;
-                let probs = ORDER
-                    .iter()
-                    .map(|d| a.labels.iter().position(|l| l == d).map_or(0.0, |i| a.probs[i]))
-                    .collect();
-                Ok((mv, Some(probs)))
-            }
+            Decider::Laya { model, questions } => to_move(&model.predict(&state_text(g), questions)?),
+            Decider::CoreML { model, questions } => to_move(&model.predict(&state_text(g), questions)?),
         }
     }
 }
@@ -139,6 +167,11 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
         .iter()
         .map(|(id, q)| Question::from_json(id, q))
         .collect::<Result<Vec<_>>>()?;
+    if args.backend == Backend::Coreml {
+        let model = CoreMLLaya::load(&root.join("models/coreml"), args.coreml_units.to_coreml())?;
+        let name = format!("coreml-{}(multilingual)", args.coreml_units.name());
+        return Ok((Decider::CoreML { model, questions }, name));
+    }
     let onnx_path = root.join(&args.onnx);
     let coreml = if args.provider == Provider::Coreml {
         Some(coreml_config(&root, &onnx_path, args.coreml_units)?)
