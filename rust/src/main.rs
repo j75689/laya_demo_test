@@ -21,9 +21,9 @@ use ort::ep::coreml::ComputeUnits;
 use serde_json::{Value, json};
 
 use coreml_laya::CoreMLLaya;
-use laya::{Answer, CoreMLConfig, Laya, Question};
+use laya::{Answer, CoreMLConfig, Laya, Predict, Question};
 use objc2_core_ml::MLComputeUnits;
-use snake::{Game, ORDER, render, rule_move, state_text};
+use snake::{Game, ORDER, move_options, render, rule_move, state_text};
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Backend {
@@ -102,6 +102,12 @@ struct Args {
     seed: u64,
     #[arg(long, default_value_t = 300)]
     max_steps: u32,
+    /// Only offer Laya moves that do not end the game
+    #[arg(long)]
+    safe: bool,
+    /// Add each move's outcome to its option text
+    #[arg(long)]
+    hints: bool,
     /// Untimed inferences before measuring
     #[arg(long, default_value_t = 3)]
     warmup: u32,
@@ -125,8 +131,8 @@ fn root() -> PathBuf {
 }
 
 enum Decider {
-    Laya { model: Laya, questions: Vec<Question> },
-    CoreML { model: CoreMLLaya, questions: Vec<Question> },
+    /// The question is rebuilt every step from `base` (see snake::move_options)
+    Laya { model: Box<dyn Predict>, id: String, base: Value, safe: bool, hints: bool },
     Rule,
 }
 
@@ -149,8 +155,22 @@ impl Decider {
     fn decide(&mut self, g: &Game) -> Result<(&'static str, Option<Vec<f32>>)> {
         match self {
             Decider::Rule => Ok((rule_move(g), None)),
-            Decider::Laya { model, questions } => to_move(&model.predict(&state_text(g), questions)?),
-            Decider::CoreML { model, questions } => to_move(&model.predict(&state_text(g), questions)?),
+            Decider::Laya { model, id, base, safe, hints } => {
+                let options = move_options(
+                    g,
+                    |d| base["criteria"][d].as_str().unwrap_or_default().to_string(),
+                    *safe,
+                    *hints,
+                );
+                if let [(only, _)] = options.as_slice() {
+                    // Forced move: nothing to ask the model
+                    let probs = ORDER.iter().map(|d| if d == only { 1.0 } else { 0.0 }).collect();
+                    return Ok((*only, Some(probs)));
+                }
+                let mut q = base.clone();
+                q["criteria"] = Value::Object(options.into_iter().map(|(d, t)| (d.to_string(), Value::String(t))).collect());
+                to_move(&model.predict(&state_text(g), &[Question::from_json(id, &q)?])?)
+            }
         }
     }
 }
@@ -161,16 +181,24 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
     }
     let root = root();
     let qjson: Value = serde_json::from_str(&std::fs::read_to_string(root.join("shared/question.json"))?)?;
-    let questions = qjson
+    let (id, base) = qjson
         .as_object()
-        .context("question.json must be a JSON object")?
-        .iter()
-        .map(|(id, q)| Question::from_json(id, q))
-        .collect::<Result<Vec<_>>>()?;
+        .and_then(|m| m.iter().next())
+        .context("question.json must be an object with one question")?;
+    // Validate the file up front instead of on the first move
+    Question::from_json(id, base)?;
+    let suffix = format!("{}{}", if args.safe { "+safe" } else { "" }, if args.hints { "+hints" } else { "" });
+    let laya = |model: Box<dyn Predict>| Decider::Laya {
+        model,
+        id: id.clone(),
+        base: base.clone(),
+        safe: args.safe,
+        hints: args.hints,
+    };
     if args.backend == Backend::Coreml {
         let model = CoreMLLaya::load(&root.join("models/coreml"), args.coreml_units.to_coreml())?;
-        let name = format!("coreml-{}(multilingual)", args.coreml_units.name());
-        return Ok((Decider::CoreML { model, questions }, name));
+        let name = format!("coreml-{}(multilingual){suffix}", args.coreml_units.name());
+        return Ok((laya(Box::new(model)), name));
     }
     let onnx_path = root.join(&args.onnx);
     let coreml = if args.provider == Provider::Coreml {
@@ -187,7 +215,7 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
         args.threads,
     )?;
     let file = onnx_path.file_name().unwrap().to_string_lossy();
-    Ok((Decider::Laya { model, questions }, format!("onnx-{provider}({file})")))
+    Ok((laya(Box::new(model)), format!("onnx-{provider}({file}){suffix}")))
 }
 
 /// Same cache layout as python/run.py. ONNX Runtime does not notice a re-exported model,

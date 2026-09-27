@@ -67,6 +67,10 @@ def main():
     if not args.skip_coreml and os.path.exists(os.path.join(ROOT, "models", "coreml", "meta.json")):
         plan.append(("laya-multilingual coreml (Fluid)", py + ["--backend", "coreml"],
                      rs + ["--backend", "coreml"], "coreml_fluid"))
+        for flags in (["--hints"], ["--safe"], ["--safe", "--hints"]):
+            label = "laya-multilingual coreml (Fluid) " + " ".join(flags)
+            plan.append((label, py + ["--backend", "coreml"] + flags, rs + ["--backend", "coreml"] + flags,
+                         "coreml_fluid" + "".join(f.strip("-") for f in flags)))
     if not args.skip_int8 and os.path.exists(os.path.join(ROOT, "models", "laya.int8.onnx")):
         plan.append(("laya onnx cpu int8", py + ["--backend", "onnx", "--onnx", "models/laya.int8.onnx"],
                      rs + ["--onnx", "models/laya.int8.onnx"], "onnx_int8"))

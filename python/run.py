@@ -22,7 +22,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from snake import ORDER, Game, render, rule_move, state_text  # noqa: E402
+from snake import ORDER, Game, move_question, render, rule_move, state_text  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -43,46 +43,51 @@ def local_model_dir() -> str:
 
 
 class LayaDecider:
-    def __init__(self, agent, questions: dict):
-        self.agent = agent
-        self.questions = questions
-        self.qid = next(iter(questions))
+    """Asks Laya for the next move. The question is rebuilt every step (see snake.move_question)."""
+
+    def __init__(self, answer, questions: dict, safe: bool = False, hints: bool = False):
+        self.answer = answer  # (state, questions) -> {qid: answer}
+        self.qid, self.base = next(iter(questions.items()))
+        self.safe = safe
+        self.hints = hints
 
     def decide(self, g: Game):
-        ans = self.agent.predict(state_text(g), self.questions)["answers"][self.qid]
-        return ans["choice"], ans["probabilities"]
+        q = move_question(g, self.base, self.safe, self.hints)
+        if len(q["criteria"]) == 1:
+            # Forced move: nothing to ask the model
+            only = next(iter(q["criteria"]))
+            return only, {d: float(d == only) for d in ORDER}
+        ans = self.answer(state_text(g), {self.qid: q})[self.qid]
+        return ans["choice"], {d: ans["probabilities"].get(d, 0.0) for d in ORDER}
 
 
 class PaddedSession:
-    """Wraps an ORT session for a static-shape model: right-pads input_ids/attention_mask to its fixed length."""
+    """Wraps an ORT session for a static-shape model and pads inputs to its fixed shape.
 
-    def __init__(self, session, pad_to: int, pad_id: int):
+    Tokens are right-padded with attention_mask 0. Option slots are padded with marker_mask False,
+    which the model masks out, so fewer options than the export had still give the same logits.
+    """
+
+    def __init__(self, session, pad_to: int, markers: int, pad_id: int):
         self.session = session
         self.pad_to = pad_to
+        self.markers = markers
         self.pad_id = pad_id
 
     def run(self, output_names, feeds):
         import numpy as np
 
-        n = feeds["input_ids"].shape[1]
-        if n > self.pad_to:
-            raise ValueError("input is %d tokens, longer than the model's static length %d" % (n, self.pad_to))
-        extra = ((0, 0), (0, self.pad_to - n))
+        n, k = feeds["input_ids"].shape[1], feeds["marker_pos"].shape[1]
+        if n > self.pad_to or k > self.markers:
+            raise ValueError("input is %d tokens / %d options, the model is fixed at %d / %d" % (
+                n, k, self.pad_to, self.markers))
+        seq, opt = ((0, 0), (0, self.pad_to - n)), ((0, 0), (0, self.markers - k))
         feeds = dict(feeds,
-                     input_ids=np.pad(feeds["input_ids"], extra, constant_values=self.pad_id),
-                     attention_mask=np.pad(feeds["attention_mask"], extra, constant_values=0))
+                     input_ids=np.pad(feeds["input_ids"], seq, constant_values=self.pad_id),
+                     attention_mask=np.pad(feeds["attention_mask"], seq, constant_values=0),
+                     marker_pos=np.pad(feeds["marker_pos"], opt, constant_values=0),
+                     marker_mask=np.pad(feeds["marker_mask"], opt, constant_values=False))
         return self.session.run(output_names, feeds)
-
-
-class CoreMLDecider:
-    def __init__(self, model, questions: dict):
-        self.model = model
-        self.questions = questions
-        self.qid = next(iter(questions))
-
-    def decide(self, g: Game):
-        ans = self.model.predict(state_text(g), self.questions)[self.qid]
-        return ans["choice"], ans["probabilities"]
 
 
 class RuleDecider:
@@ -94,12 +99,13 @@ def build_decider(args):
     """Return (decider, display name)."""
     if args.backend == "rule":
         return RuleDecider(), "rule"
+    suffix = ("+safe" if args.safe else "") + ("+hints" if args.hints else "")
     if args.backend == "coreml":
         from coreml_laya import CoreMLLaya
 
-        return (CoreMLDecider(CoreMLLaya(os.path.join(ROOT, "models", "coreml"), args.coreml_units),
-                              load_questions()),
-                "coreml-%s(multilingual)" % args.coreml_units)
+        model = CoreMLLaya(os.path.join(ROOT, "models", "coreml"), args.coreml_units)
+        return (LayaDecider(model.predict, load_questions(), args.safe, args.hints),
+                "coreml-%s(multilingual)%s" % (args.coreml_units, suffix))
 
     import warnings
 
@@ -114,7 +120,8 @@ def build_decider(args):
 
             torch.set_num_threads(args.threads)
         agent = laya.Agent(model_dir, device=args.device)
-        return LayaDecider(agent, questions), "torch-%s" % args.device
+        return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints),
+                "torch-%s%s" % (args.device, suffix))
 
     import onnxruntime as ort
     from laya.onnx_agent import ONNXAgent
@@ -136,11 +143,13 @@ def build_decider(args):
     finally:
         ort.InferenceSession = real_session
 
-    name = "onnx-%s(%s)" % (args.provider, os.path.basename(args.onnx))
-    seq_dim = agent.session.get_inputs()[0].shape[1]
+    name = "onnx-%s(%s)%s" % (args.provider, os.path.basename(args.onnx), suffix)
+    shapes = {i.name: i.shape for i in agent.session.get_inputs()}
+    seq_dim, marker_dim = shapes["input_ids"][1], shapes["marker_pos"][1]
     if isinstance(seq_dim, int):
-        agent.session = PaddedSession(agent.session, seq_dim, agent.tok.pad_token_id)
-    return LayaDecider(agent, questions), name
+        agent.session = PaddedSession(agent.session, seq_dim, marker_dim, agent.tok.pad_token_id)
+    return (LayaDecider(lambda s, q: agent.predict(s, q)["answers"], questions, args.safe, args.hints),
+            name)
 
 
 COREML_UNITS = {"all": "ALL", "gpu": "CPUAndGPU", "ane": "CPUAndNeuralEngine", "cpu": "CPUOnly"}
@@ -186,6 +195,8 @@ def main():
                         help="CoreML compute units for --provider coreml and --backend coreml "
                              "(gpu = CPU+GPU, ane = CPU+Neural Engine)")
     parser.add_argument("--threads", type=int, default=0, help="CPU threads for inference (0 = library default)")
+    parser.add_argument("--safe", action="store_true", help="only offer Laya moves that do not end the game")
+    parser.add_argument("--hints", action="store_true", help="add each move's outcome to its option text")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--size", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)

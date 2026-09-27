@@ -19,7 +19,7 @@ use objc2_core_ml::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSNumber, NSString, NSURL, ns_string};
 
-use crate::laya::{Answer, Encoder, Question};
+use crate::laya::{Answer, Encoder, Predict, Question};
 
 fn ns_err(e: Retained<NSError>) -> anyhow::Error {
     anyhow!("Core ML: {}", e.localizedDescription())
@@ -67,12 +67,6 @@ impl CoreMLLaya {
         }
         .map_err(ns_err)?;
         Ok(Self { model, enc, len, max_options })
-    }
-
-    /// Same contract as `Laya::predict`: one answer per question, in order.
-    pub fn predict(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>> {
-        let state_ids = self.enc.encode_state(state)?;
-        questions.iter().map(|q| self.run(&state_ids, q)).collect()
     }
 
     fn run(&self, state_ids: &[i64], q: &Question) -> Result<Answer> {
@@ -127,5 +121,12 @@ impl CoreMLLaya {
                 .collect();
             Ok(self.enc.answer(q, |j| vals[j]))
         })
+    }
+}
+
+impl Predict for CoreMLLaya {
+    fn predict(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>> {
+        let state_ids = self.enc.encode_state(state)?;
+        questions.iter().map(|q| self.run(&state_ids, q)).collect()
     }
 }

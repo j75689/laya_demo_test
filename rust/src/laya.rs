@@ -266,12 +266,32 @@ impl Encoder {
     }
 }
 
+/// A Laya runtime: ONNX Runtime (`Laya`) or Core ML (`CoreMLLaya`).
+pub trait Predict {
+    /// One answer per question, in order.
+    fn predict(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>>;
+}
+
+/// Static dimension `dim` of an ONNX input, or None when it is dynamic.
+fn static_dim(session: &Session, input: &str, dim: usize) -> Option<usize> {
+    session
+        .inputs()
+        .iter()
+        .find(|i| i.name() == input)
+        .and_then(|i| i.dtype().tensor_shape())
+        .and_then(|shape| shape.get(dim).copied())
+        .filter(|&len| len > 0)
+        .map(|len| len as usize)
+}
+
 /// Laya on ONNX Runtime.
 pub struct Laya {
     session: Session,
     enc: Encoder,
     /// Fixed sequence length of a static-shape model; inputs are right-padded to it
     pad_to: Option<usize>,
+    /// Fixed option-slot count of a static-shape model; unused slots are masked out
+    marker_slots: Option<usize>,
 }
 
 impl Laya {
@@ -303,19 +323,15 @@ impl Laya {
         let session = builder
             .commit_from_file(onnx_path)
             .with_context(|| format!("loading {}", onnx_path.display()))?;
-        let pad_to = session
-            .inputs()
-            .iter()
-            .find(|i| i.name() == "input_ids")
-            .and_then(|i| i.dtype().tensor_shape())
-            .and_then(|shape| shape.get(1).copied())
-            .filter(|&len| len > 0)
-            .map(|len| len as usize);
-        Ok(Self { session, enc, pad_to })
+        let pad_to = static_dim(&session, "input_ids", 1);
+        let marker_slots = static_dim(&session, "marker_pos", 1);
+        Ok(Self { session, enc, pad_to, marker_slots })
     }
+}
 
+impl Predict for Laya {
     /// Mirrors ONNXAgent.predict(): all questions go through the model in one batch.
-    pub fn predict(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>> {
+    fn predict(&mut self, state: &str, questions: &[Question]) -> Result<Vec<Answer>> {
         let state_ids = self.enc.encode_state(state)?;
         let items = questions
             .iter()
@@ -331,7 +347,13 @@ impl Laya {
             }
             seq_len = pad_to;
         }
-        let kmax = items.iter().map(|(_, mk)| mk.len()).max().unwrap_or(0);
+        let mut kmax = items.iter().map(|(_, mk)| mk.len()).max().unwrap_or(0);
+        if let Some(slots) = self.marker_slots {
+            if kmax > slots {
+                bail!("{kmax} options, the model is fixed at {slots}");
+            }
+            kmax = slots;
+        }
         let mut input_ids = Array2::<i64>::from_elem((n, seq_len), self.enc.meta.pad_id);
         let mut attention = Array2::<i64>::zeros((n, seq_len));
         let mut marker_pos = Array2::<i64>::zeros((n, kmax));

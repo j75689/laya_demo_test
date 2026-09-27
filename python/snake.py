@@ -113,6 +113,35 @@ def state_text(g: Game) -> str:
     ])
 
 
+def move_question(g: Game, base: dict, safe: bool = False, hints: bool = False) -> dict:
+    """The Laya question for this step, built from shared/question.json.
+
+    safe:  only offer moves that do not end the game (all four if every move is deadly).
+    hints: append each move's outcome to its option text, e.g. "hits the wall, game over".
+    """
+    hx, hy = g.body[0]
+    fx, fy = g.food
+    status = {d: g.cell_status(d) for d in ORDER}
+    moves = [d for d in ORDER if status[d] not in DEADLY] if safe else list(ORDER)
+    if not moves:
+        moves = list(ORDER)
+    criteria = {}
+    for d in moves:
+        text = base["criteria"][d]
+        if hints:
+            dx, dy = DIRS[d]
+            closer = abs(hx + dx - fx) + abs(hy + dy - fy) < abs(hx - fx) + abs(hy - fy)
+            outcome = {
+                "wall": "hits the wall, game over",
+                "body": "hits its own body, game over",
+                "food": "eats the food",
+                "free": "moves closer to the food" if closer else "moves away from the food",
+            }[status[d]]
+            text = "%s; %s" % (text, outcome)
+        criteria[d] = text
+    return dict(base, criteria=criteria)
+
+
 def rule_move(g: Game) -> str:
     """Baseline: among safe moves pick the one closest to the food; ties follow ORDER."""
     hx, hy = g.body[0]

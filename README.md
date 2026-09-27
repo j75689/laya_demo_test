@@ -91,6 +91,8 @@ Common flags for both runners:
 | `--threads` | CPU threads for inference |
 | `--render` | draw the game in the terminal |
 | `--delay` | extra pause per step, in seconds |
+| `--safe` | only offer Laya moves that do not end the game |
+| `--hints` | add each move's outcome to its option text ("hits the wall, game over", "moves closer to the food") |
 | `--trace` | write every decision to a JSONL file |
 | `--json` | print a one-line JSON summary |
 
@@ -102,7 +104,7 @@ The ONNX and Core ML backends also take:
 | `--provider cpu\|coreml` | execution provider |
 | `--coreml-units all\|gpu\|ane\|cpu` | CoreML compute units (`--provider coreml` and `--backend coreml`) |
 
-A static-shape model (`laya.staticN.onnx`) is detected automatically, and inputs are padded to N tokens.
+A static-shape model (`laya.staticN.onnx`) is detected automatically. Inputs are padded to N tokens, and option slots are padded with a mask, so `--safe` can offer fewer than four options.
 
 ## Results
 
@@ -154,7 +156,22 @@ All FP32 backends make identical moves: torch cpu, torch mps, onnx cpu, onnx cor
    | CPU only | 296 ms |
 
    It is a different checkpoint from the English model, so its decisions differ from the ONNX rows. It cannot play snake either.
-8. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
+8. **Filtering the options stops the wall deaths; hints do not teach it to chase food.**
+   The question is rebuilt every step (`snake.move_question` / `snake::move_options`). With only one safe move left, the runner takes it without asking the model.
+   Results for laya-multilingual on Core ML, 10 games each (Python and Rust identical on every step):
+
+   | Flags | Avg score | Game over |
+   |---|---:|---|
+   | none | 0.0 | wall 10 |
+   | `--hints` | 0.2 | wall 10 |
+   | `--safe` | 0.2 | starved 10 |
+   | `--safe --hints` | 0.3 | starved 10 |
+
+   `--safe` ends every wall and body death, but the snake then wanders until it starves.
+   When it could choose, it took a move toward the food only 11% of the time, and 14% with `--hints`. A random pick would do about 50%.
+   Its picks follow a fixed preference instead: it almost never goes `down`. The English model with `--safe --hints` did a little better in a short run (scores 3 and 1 over 2 games).
+   Hard constraints belong in code; making Laya actually chase food would take fine-tuning.
+9. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
 
 ## Notes
 

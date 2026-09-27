@@ -201,6 +201,43 @@ pub fn state_text(g: &Game) -> String {
     .join("\n")
 }
 
+/// Options for this step's Laya question; mirrors move_question() in python/snake.py.
+///
+/// safe:  only offer moves that do not end the game (all four if every move is deadly).
+/// hints: append each move's outcome to its option text, e.g. "hits the wall, game over".
+pub fn move_options(
+    g: &Game,
+    base: impl Fn(&str) -> String,
+    safe: bool,
+    hints: bool,
+) -> Vec<(&'static str, String)> {
+    let (hx, hy) = g.body[0];
+    let (fx, fy) = g.food.expect("a running game always has food");
+    let mut moves: Vec<&'static str> = ORDER.into_iter().filter(|d| !safe || !g.cell_status(d).deadly()).collect();
+    if moves.is_empty() {
+        moves = ORDER.to_vec();
+    }
+    moves
+        .into_iter()
+        .map(|d| {
+            let mut text = base(d);
+            if hints {
+                let (dx, dy) = delta(d);
+                let closer = (hx + dx - fx).abs() + (hy + dy - fy).abs() < (hx - fx).abs() + (hy - fy).abs();
+                let outcome = match g.cell_status(d) {
+                    Cell::Wall => "hits the wall, game over",
+                    Cell::Body => "hits its own body, game over",
+                    Cell::Food => "eats the food",
+                    Cell::Free if closer => "moves closer to the food",
+                    Cell::Free => "moves away from the food",
+                };
+                text = format!("{text}; {outcome}");
+            }
+            (d, text)
+        })
+        .collect()
+}
+
 /// Baseline: among safe moves pick the one closest to the food; ties follow ORDER.
 pub fn rule_move(g: &Game) -> &'static str {
     let (hx, hy) = g.body[0];
