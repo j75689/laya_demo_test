@@ -26,6 +26,7 @@ python/run.py            Python runner (torch / onnx / rule backends)
 python/export_onnx.py    checkpoint -> models/laya.onnx (+ tokenizer.json, meta.json for Rust)
 python/fetch_coreml.py   downloads the Core ML model into models/coreml/ (+ --verify against PyTorch)
 python/coreml_laya.py    Laya on the Core ML model via coremltools
+python/finetune.py       fine-tunes Laya's decision head on snake (rule baseline as teacher) -> models/finetuned/
 python/compare_traces.py step-by-step diff of two --trace files
 python/bench.py          runs every combination and prints one table
 rust/src/snake.rs        game engine (line-for-line port of snake.py)
@@ -46,6 +47,10 @@ python3 -m venv .venv
 .venv/bin/python python/fetch_coreml.py --verify   # pre-compiled Core ML model (~615 MB)
 
 cd rust && cargo build --release && cd ..
+
+# Optional: fine-tune Laya on snake (~30 min on an M3), then export it for the Rust runner
+.venv/bin/python python/finetune.py
+.venv/bin/python python/export_onnx.py --model-dir models/finetuned --out models/finetuned --static 256
 ```
 
 `export_onnx.py` checks the ONNX output against PyTorch on inputs of 175 to 512 tokens.
@@ -69,6 +74,10 @@ It prints `FP32: max logit error 0.00004, same decision 7/7`.
 ./rust/target/release/snake-laya --onnx models/laya.static192.onnx --provider coreml --render
 .venv/bin/python python/run.py --backend onnx --onnx models/laya.static192.onnx --provider coreml --render
 ./rust/target/release/snake-laya --backend rule --render --delay 0.05
+
+# Fine-tuned model
+.venv/bin/python python/run.py --backend torch --device mps --model-dir models/finetuned --safe --render
+./rust/target/release/snake-laya --onnx models/finetuned/laya.static256.onnx --provider coreml --safe --render
 
 # Prove the Rust port makes the same decisions as the official Python package
 .venv/bin/python python/run.py --backend onnx --trace traces/py.jsonl
@@ -174,7 +183,31 @@ All FP32 backends make identical moves: torch cpu, torch mps, onnx cpu, onnx cor
 
    Even among safe moves it rarely heads for the food: it took a food-ward move 11% of the time, and 14% with `--hints`, against about 50% for a random pick. It almost never goes `down`.
    Hard constraints belong in code; making Laya actually chase food would take fine-tuning.
-9. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
+9. **Fine-tuning the decision head teaches Laya to play.** `python/finetune.py` freezes the laya-multilingual encoder and trains only the head: 2 transformer layers, the question-type embedding and the option scorer.
+   The training data is 4000 positions labelled by the rule baseline, with random `--safe`/`--hints` question variants. It ran on an M3 via MPS: 7 minutes to encode, then 3 minutes per epoch.
+   Share of validation positions (unseen games) where it picks a safe move that eats or approaches the food:
+
+   | Epoch | Accuracy |
+   |---|---:|
+   | zero-shot | 52.6% |
+   | 1 | 76.0% |
+   | 2 | 95.1% |
+   | 3 | 96.5% |
+   | 5 | 97.5% |
+
+   In the game, 10 games each:
+
+   | Setup | Avg score | Game over |
+   |---|---:|---|
+   | base laya-multilingual, no flags | 0.0 | wall 10 |
+   | fine-tuned, no flags | 6.9 | body 10, never a wall |
+   | fine-tuned, `--safe` | 19.6 | body 9, max_steps 1 |
+   | rule baseline (same seeds) | 22.9 | |
+
+   The remaining deaths are the snake boxing itself in, which the greedy rule baseline does too.
+   PyTorch MPS, ONNX Runtime + CoreML from Python, and the Rust runner make identical moves on all 1579 steps.
+   The pre-compiled FluidInference Core ML model cannot take new weights, so the fine-tuned model runs at 67-93 ms on PyTorch MPS or 139 ms from Rust via ONNX Runtime + CoreML, not 12 ms. Getting 12 ms back would mean converting it with coremltools the way FluidInference did.
+10. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
 
 ## Notes
 

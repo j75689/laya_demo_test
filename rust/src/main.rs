@@ -3,6 +3,7 @@
 //! Examples:
 //!     cargo run --release -- --render
 //!     cargo run --release -- --onnx models/laya.int8.onnx --episodes 5
+//!     cargo run --release -- --onnx models/finetuned/laya.static256.onnx --provider coreml
 //!     cargo run --release -- --backend coreml --render      # pre-compiled Core ML model
 //!     cargo run --release -- --backend rule --render --delay 0.05
 
@@ -234,8 +235,9 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
     let provider = if coreml.is_some() { "coreml" } else { "cpu" };
     let model = Laya::load(
         &onnx_path,
-        &root.join("models/tokenizer.json"),
-        &root.join("models/meta.json"),
+        // export_onnx.py writes tokenizer.json and meta.json next to the model
+        &onnx_path.with_file_name("tokenizer.json"),
+        &onnx_path.with_file_name("meta.json"),
         coreml,
         args.threads,
     )?;

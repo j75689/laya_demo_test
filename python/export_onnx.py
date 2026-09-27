@@ -13,6 +13,7 @@ Usage:
     python python/export_onnx.py            # writes models/laya.onnx (+ laya.onnx.data)
     python python/export_onnx.py --int8     # also writes models/laya.int8.onnx
     python python/export_onnx.py --static 192   # also writes models/laya.static192.onnx (CoreML)
+    python python/export_onnx.py --model-dir models/finetuned --out models/finetuned --static 256
 """
 
 import argparse
@@ -34,7 +35,6 @@ from laya.onnx_agent import ONNXAgent  # noqa: E402
 from snake import Game, rule_move, state_text  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODELS = os.path.join(ROOT, "models")
 INPUT_NAMES = ["input_ids", "attention_mask", "marker_pos", "marker_mask", "qtype"]
 OUTPUT_NAMES = ["logits", "act_logits"]
 
@@ -160,7 +160,7 @@ def export_static(agent: Agent, questions: dict, path: str, pad_to: int) -> None
     print("Wrote %s (%.0f s)" % (path, time.time() - t0))
 
 
-def export_int8(fp32_path: str, int8_path: str) -> None:
+def export_int8(fp32_path: str, int8_path: str, out: str) -> None:
     import onnx
     from onnxruntime.quantization import QuantType, quantize_dynamic
 
@@ -169,7 +169,7 @@ def export_int8(fp32_path: str, int8_path: str) -> None:
     # shape inference fail. value_info is only a hint, so dropping it does not change the math.
     model = onnx.load(fp32_path)
     del model.graph.value_info[:]
-    tmp_path = os.path.join(MODELS, "_prequant.onnx")
+    tmp_path = os.path.join(out, "_prequant.onnx")
     onnx.save(model, tmp_path, save_as_external_data=True, location="_prequant.onnx.data")
     del model
     try:
@@ -186,14 +186,17 @@ def main():
     parser = argparse.ArgumentParser(description="Export Laya to ONNX for the Python/Rust snake demo")
     parser.add_argument("--int8", action="store_true", help="also write a dynamically quantized INT8 model")
     parser.add_argument("--skip-export", action="store_true", help="reuse an existing models/laya.onnx")
+    parser.add_argument("--model-dir", help="Laya checkpoint to export (default: convaiinnovations/laya)")
+    parser.add_argument("--out", default="models", help="output directory, relative to the project root")
     parser.add_argument("--static", type=int, default=0, metavar="N",
                         help="also write models/laya.staticN.onnx with inputs fixed to N tokens (for CoreML)")
     args = parser.parse_args()
 
-    os.makedirs(MODELS, exist_ok=True)
-    model_dir = local_model_dir()
+    out = os.path.join(ROOT, args.out)
+    os.makedirs(out, exist_ok=True)
+    model_dir = os.path.join(ROOT, args.model_dir) if args.model_dir else local_model_dir()
     questions = load_questions()
-    fp32_path = os.path.join(MODELS, "laya.onnx")
+    fp32_path = os.path.join(out, "laya.onnx")
 
     print("Loading PyTorch checkpoint: %s" % model_dir)
     agent = Agent(model_dir, device="cpu", compile=False)
@@ -203,7 +206,7 @@ def main():
         export_fp32(agent, questions, fp32_path)
 
     # The Rust port has no transformers library, so everything it needs goes into plain files
-    shutil.copy(os.path.join(model_dir, "tokenizer", "tokenizer.json"), os.path.join(MODELS, "tokenizer.json"))
+    shutil.copyfile(os.path.join(model_dir, "tokenizer", "tokenizer.json"), os.path.join(out, "tokenizer.json"))
     tok = agent.tok
     meta = {
         "cls_id": tok.cls_token_id,
@@ -217,19 +220,19 @@ def main():
         "temperature": agent.temperature,
         "temperature_by_options": agent.temperature_by_options,
     }
-    with open(os.path.join(MODELS, "meta.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
-    print("Wrote models/tokenizer.json and models/meta.json")
+    print("Wrote %s/tokenizer.json and %s/meta.json" % (args.out, args.out))
 
     verify(agent, fp32_path, questions, "FP32")
 
     if args.int8:
-        int8_path = os.path.join(MODELS, "laya.int8.onnx")
-        export_int8(fp32_path, int8_path)
+        int8_path = os.path.join(out, "laya.int8.onnx")
+        export_int8(fp32_path, int8_path, out)
         verify(agent, int8_path, questions, "INT8")
 
     if args.static:
-        static_path = os.path.join(MODELS, "laya.static%d.onnx" % args.static)
+        static_path = os.path.join(out, "laya.static%d.onnx" % args.static)
         if not os.path.exists(static_path):
             export_static(agent, questions, static_path, args.static)
         verify(agent, static_path, questions, "STATIC%d" % args.static, pad_to=args.static)

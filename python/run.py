@@ -42,6 +42,16 @@ def local_model_dir() -> str:
         return snapshot_download("convaiinnovations/laya", allow_patterns=patterns)
 
 
+def resolve_model_dir(args) -> str:
+    """Checkpoint for the tokenizer/config (and the weights, on the torch backend)."""
+    if args.model_dir:
+        return os.path.join(ROOT, args.model_dir)
+    beside_onnx = os.path.dirname(os.path.join(ROOT, args.onnx))
+    if args.backend == "onnx" and os.path.exists(os.path.join(beside_onnx, "rl_agent_config.json")):
+        return beside_onnx
+    return local_model_dir()
+
+
 class LayaDecider:
     """Asks Laya for the next move. The question is rebuilt every step (see snake.move_question)."""
 
@@ -126,7 +136,7 @@ def build_decider(args):
     import laya
 
     questions = load_questions()
-    model_dir = local_model_dir()
+    model_dir = resolve_model_dir(args)
     if args.backend == "torch":
         if args.threads:
             import torch
@@ -203,6 +213,8 @@ def main():
     parser.add_argument("--backend", choices=["torch", "onnx", "coreml", "rule"], default="onnx")
     parser.add_argument("--device", default="cpu", help="torch backend: cpu or mps")
     parser.add_argument("--onnx", default="models/laya.onnx", help="onnx backend: model path, relative to the project root")
+    parser.add_argument("--model-dir", help="torch/onnx backends: Laya checkpoint directory, e.g. models/finetuned "
+                                            "(default: next to --onnx if it holds one, else convaiinnovations/laya)")
     parser.add_argument("--provider", choices=["cpu", "coreml"], default="cpu")
     parser.add_argument("--coreml-units", choices=sorted(COREML_UNITS), default="all",
                         help="CoreML compute units for --provider coreml and --backend coreml "

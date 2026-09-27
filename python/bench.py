@@ -71,6 +71,18 @@ def main():
             label = "laya-multilingual coreml (Fluid) " + " ".join(flags)
             plan.append((label, py + ["--backend", "coreml"] + flags, rs + ["--backend", "coreml"] + flags,
                          "coreml_fluid" + "".join(f.strip("-") for f in flags)))
+    ft = "models/finetuned"
+    if os.path.exists(os.path.join(ROOT, ft, "rl_agent_config.json")):
+        if not args.skip_torch:
+            for flags in ([], ["--safe"]):
+                plan.append(("fine-tuned torch mps " + " ".join(flags),
+                             py + ["--backend", "torch", "--device", "mps", "--model-dir", ft] + flags, None,
+                             "ft_torch_mps" + "".join(f.strip("-") for f in flags)))
+        ft_static = ft + "/laya.static256.onnx"
+        if not args.skip_coreml and os.path.exists(os.path.join(ROOT, ft_static)):
+            plan.append(("fine-tuned onnx coreml static256 --safe",
+                         py + ["--backend", "onnx", "--onnx", ft_static, "--provider", "coreml", "--safe"],
+                         rs + ["--onnx", ft_static, "--provider", "coreml", "--safe"], "ft_onnx_coreml_safe"))
     if not args.skip_int8 and os.path.exists(os.path.join(ROOT, "models", "laya.int8.onnx")):
         plan.append(("laya onnx cpu int8", py + ["--backend", "onnx", "--onnx", "models/laya.int8.onnx"],
                      rs + ["--onnx", "models/laya.int8.onnx"], "onnx_int8"))
