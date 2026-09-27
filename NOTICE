@@ -1,0 +1,22 @@
+laya_demo_test
+Copyright 2026 dylanhuang
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project includes third-party code:
+
+- python/coreml_export.py is taken from FluidInference/mobius,
+  models/computer-use/laya/coreml/export_model.py
+  (https://github.com/FluidInference/mobius), licensed under the Apache License 2.0.
+  It is unmodified apart from an added header comment.
+
+This project also adapts ideas and logic from, but does not redistribute:
+
+- Laya by Convai Innovations (https://github.com/NandhaKishorM/laya), Apache License 2.0.
+  rust/src/laya.rs and python/export_onnx.py follow its sequence format, post-processing
+  and ONNX export script.
+
+Model weights are not included. The scripts download them at run time from:
+
+- convaiinnovations/laya (Apache License 2.0)
+- FluidInference/laya-coreml (Apache License 2.0)

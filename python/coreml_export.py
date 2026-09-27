@@ -1,5 +1,6 @@
 # Adapted from FluidInference/mobius, models/computer-use/laya/coreml/export_model.py
-# https://github.com/FluidInference/mobius (Apache-2.0). Unmodified apart from this header.
+# https://github.com/FluidInference/mobius, licensed under the Apache License 2.0 (see LICENSE and NOTICE).
+# Unmodified apart from this header.
 # Runs in the conversion environment (requirements-coreml.txt), not the main one.
 
 """Fixed-shape, eager-attention export adapter around the unmodified laya DecisionModel."""

@@ -234,3 +234,9 @@ All FP32 backends make identical moves: torch cpu, torch mps, onnx cpu, onnx cor
 - The game loop in both runners is sequential: one Laya call per move, timed end to end. Each timing covers building the state text, tokenizing, running the model and post-processing.
 - Each CoreML cache under `models/coreml_cache/` is about 3.3 GB. Delete stale ones freely; they are rebuilt on demand.
 - The Rust port supports `choice`, `score` and `noul` questions. It does not support custom `noul` labels or non-string instructions.
+
+## License
+
+Apache License 2.0, see [LICENSE](LICENSE).
+`python/coreml_export.py` comes from [FluidInference/mobius](https://github.com/FluidInference/mobius) (Apache-2.0); see [NOTICE](NOTICE) for third-party details.
+Model weights are not part of this repository; they are downloaded from Hugging Face at run time.
