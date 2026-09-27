@@ -1,0 +1,8 @@
+# Conversion environment for python/convert_coreml.py (separate from requirements.txt):
+# coremltools 9.0 is only tested with torch 2.7, and its PyTorch frontend fails on newer torch.
+#   python3 -m venv .venv-coreml && .venv-coreml/bin/pip install -r requirements-coreml.txt
+torch==2.7.0
+coremltools==9.0
+numpy<2.3
+laya==0.3.20
+transformers==5.17.0

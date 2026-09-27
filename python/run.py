@@ -3,7 +3,7 @@
 Backends:
     torch   official laya.Agent (PyTorch), --device cpu|mps
     onnx    official laya.ONNXAgent (ONNX Runtime), --provider cpu|coreml
-    coreml  pre-compiled Core ML laya-multilingual (models/coreml/, see fetch_coreml.py)
+    coreml  compiled Core ML model (--coreml-dir; fetch_coreml.py or convert_coreml.py)
     rule    rule-based baseline (no model)
 
 Examples:
@@ -126,9 +126,9 @@ def build_decider(args):
     if args.backend == "coreml":
         from coreml_laya import CoreMLLaya
 
-        model = CoreMLLaya(os.path.join(ROOT, "models", "coreml"), args.coreml_units)
+        model = CoreMLLaya(os.path.join(ROOT, args.coreml_dir), args.coreml_units)
         return (LayaDecider(model.predict, load_questions(), args.safe, args.hints, args.sample),
-                "coreml-%s(multilingual)%s" % (args.coreml_units, suffix))
+                "coreml-%s(%s)%s" % (args.coreml_units, os.path.basename(args.coreml_dir.rstrip("/")), suffix))
 
     import warnings
 
@@ -213,6 +213,8 @@ def main():
     parser.add_argument("--backend", choices=["torch", "onnx", "coreml", "rule"], default="onnx")
     parser.add_argument("--device", default="cpu", help="torch backend: cpu or mps")
     parser.add_argument("--onnx", default="models/laya.onnx", help="onnx backend: model path, relative to the project root")
+    parser.add_argument("--coreml-dir", default="models/coreml",
+                        help="coreml backend: directory from fetch_coreml.py or convert_coreml.py")
     parser.add_argument("--model-dir", help="torch/onnx backends: Laya checkpoint directory, e.g. models/finetuned "
                                             "(default: next to --onnx if it holds one, else convaiinnovations/laya)")
     parser.add_argument("--provider", choices=["cpu", "coreml"], default="cpu")

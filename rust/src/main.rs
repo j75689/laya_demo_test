@@ -29,7 +29,7 @@ use snake::{Game, ORDER, XorShift32, move_options, render, rule_move, sample_mov
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Backend {
     Onnx,
-    /// Pre-compiled Core ML laya-multilingual (models/coreml/, see python/fetch_coreml.py)
+    /// Compiled Core ML model (--coreml-dir; python/fetch_coreml.py or python/convert_coreml.py)
     Coreml,
     Rule,
 }
@@ -89,6 +89,9 @@ struct Args {
     onnx: String,
     #[arg(long, value_enum, default_value = "cpu")]
     provider: Provider,
+    /// coreml backend: directory from fetch_coreml.py or convert_coreml.py
+    #[arg(long, default_value = "models/coreml")]
+    coreml_dir: String,
     /// CoreML compute units, for --provider coreml and --backend coreml
     #[arg(long, value_enum, default_value = "all")]
     coreml_units: Units,
@@ -222,8 +225,9 @@ fn build_decider(args: &Args) -> Result<(Decider, String)> {
         sample: args.sample.then(|| XorShift32::new(0)),
     };
     if args.backend == Backend::Coreml {
-        let model = CoreMLLaya::load(&root.join("models/coreml"), args.coreml_units.to_coreml())?;
-        let name = format!("coreml-{}(multilingual){suffix}", args.coreml_units.name());
+        let model = CoreMLLaya::load(&root.join(&args.coreml_dir), args.coreml_units.to_coreml())?;
+        let dir = std::path::Path::new(&args.coreml_dir).file_name().unwrap().to_string_lossy();
+        let name = format!("coreml-{}({dir}){suffix}", args.coreml_units.name());
         return Ok((laya(Box::new(model)), name));
     }
     let onnx_path = root.join(&args.onnx);

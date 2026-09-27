@@ -78,6 +78,9 @@ def main():
                 plan.append(("fine-tuned torch mps " + " ".join(flags),
                              py + ["--backend", "torch", "--device", "mps", "--model-dir", ft] + flags, None,
                              "ft_torch_mps" + "".join(f.strip("-") for f in flags)))
+        if not args.skip_coreml and os.path.exists(os.path.join(ROOT, "models", "finetuned_coreml", "meta.json")):
+            cm = ["--backend", "coreml", "--coreml-dir", "models/finetuned_coreml", "--safe"]
+            plan.append(("fine-tuned coreml (convert_coreml.py) --safe", py + cm, rs + cm, "ft_coreml_safe"))
         ft_static = ft + "/laya.static256.onnx"
         if not args.skip_coreml and os.path.exists(os.path.join(ROOT, ft_static)):
             plan.append(("fine-tuned onnx coreml static256 --safe",

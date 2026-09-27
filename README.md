@@ -27,6 +27,8 @@ python/export_onnx.py    checkpoint -> models/laya.onnx (+ tokenizer.json, meta.
 python/fetch_coreml.py   downloads the Core ML model into models/coreml/ (+ --verify against PyTorch)
 python/coreml_laya.py    Laya on the Core ML model via coremltools
 python/finetune.py       fine-tunes Laya's decision head on snake (rule baseline as teacher) -> models/finetuned/
+python/convert_coreml.py converts a checkpoint to Core ML (run in .venv-coreml) -> models/finetuned_coreml/
+python/coreml_export.py  fixed-shape export adapter, vendored from FluidInference/mobius (Apache-2.0)
 python/compare_traces.py step-by-step diff of two --trace files
 python/bench.py          runs every combination and prints one table
 rust/src/snake.rs        game engine (line-for-line port of snake.py)
@@ -51,6 +53,10 @@ cd rust && cargo build --release && cd ..
 # Optional: fine-tune Laya on snake (~30 min on an M3), then export it for the Rust runner
 .venv/bin/python python/finetune.py
 .venv/bin/python python/export_onnx.py --model-dir models/finetuned --out models/finetuned --static 256
+
+# Convert the fine-tuned model to Core ML (~20 s). coremltools 9.0 needs torch 2.7, hence a separate venv
+python3 -m venv .venv-coreml && .venv-coreml/bin/pip install -r requirements-coreml.txt
+.venv-coreml/bin/python python/convert_coreml.py
 ```
 
 `export_onnx.py` checks the ONNX output against PyTorch on inputs of 175 to 512 tokens.
@@ -75,7 +81,9 @@ It prints `FP32: max logit error 0.00004, same decision 7/7`.
 .venv/bin/python python/run.py --backend onnx --onnx models/laya.static192.onnx --provider coreml --render
 ./rust/target/release/snake-laya --backend rule --render --delay 0.05
 
-# Fine-tuned model
+# Fine-tuned model (Core ML conversion: ~11 ms per decision)
+./rust/target/release/snake-laya --backend coreml --coreml-dir models/finetuned_coreml --safe --render
+.venv/bin/python python/run.py --backend coreml --coreml-dir models/finetuned_coreml --safe --render
 .venv/bin/python python/run.py --backend torch --device mps --model-dir models/finetuned --safe --render
 ./rust/target/release/snake-laya --onnx models/finetuned/laya.static256.onnx --provider coreml --safe --render
 
@@ -106,7 +114,7 @@ Common flags for both runners:
 | `--trace` | write every decision to a JSONL file |
 | `--json` | print a one-line JSON summary |
 
-The ONNX and Core ML backends also take:
+The ONNX and Core ML backends also take (`--coreml-dir` picks the Core ML model, default `models/coreml`):
 
 | Flag | Meaning |
 |---|---|
@@ -206,8 +214,20 @@ All FP32 backends make identical moves: torch cpu, torch mps, onnx cpu, onnx cor
 
    The remaining deaths are the snake boxing itself in, which the greedy rule baseline does too.
    PyTorch MPS, ONNX Runtime + CoreML from Python, and the Rust runner make identical moves on all 1579 steps.
-   The pre-compiled FluidInference Core ML model cannot take new weights, so the fine-tuned model runs at 67-93 ms on PyTorch MPS or 139 ms from Rust via ONNX Runtime + CoreML, not 12 ms. Getting 12 ms back would mean converting it with coremltools the way FluidInference did.
-10. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
+   Through ONNX Runtime + CoreML the fine-tuned model runs at 139 ms from Rust, and at 67-93 ms on PyTorch MPS.
+10. **Converting with coremltools brings the fine-tuned model to ~11 ms.** `python/convert_coreml.py` uses FluidInference's export adapter and settings: a fixed shape, FP16 ML Program, one-hot option markers.
+   The conversion takes about 20 s, in a separate venv because coremltools 9.0 fails on torch 2.14.
+   Speed and agreement on 40 unseen positions:
+
+   | Compute units | p50 per decision | Same decision as PyTorch |
+   |---|---:|---|
+   | CPU + Neural Engine | 11.5 ms | 40/40 |
+   | ALL | 12.5 ms | 40/40 |
+   | CPU + GPU | 30 ms | 40/40 |
+
+   In the game (10 games, `--safe`): average 19.3, against 19.6 on PyTorch. Rust and Python agree on all 1600 steps.
+   Against the FP32 PyTorch run, game 0 diverges at step 152. There PyTorch scored right/down at 0.5004/0.4986 and FP16 Core ML at 0.4956/0.5034: both are good moves, and the games differ from then on.
+11. **The official ONNX export script only works for one input length.** `scripts/export_onnx.py` uses the TorchScript tracer, which bakes the example sequence length into the head's attention reshape. Any other length fails with a Reshape error. `python/export_onnx.py` uses the `torch.export` (dynamo) exporter instead.
 
 ## Notes
 
