@@ -1,0 +1,7 @@
+# Versions this demo was tested with (macOS, Apple M3, Python 3.13)
+laya==0.3.20
+torch==2.14.0
+transformers==5.17.0
+onnxruntime==1.30.0
+onnx==1.23.0
+onnxscript==0.7.2

@@ -1,0 +1,12 @@
+{
+  "move": {
+    "type": "choice",
+    "instructions": "You control the snake. Pick its next move. Never move into a wall or into its own body, because that ends the game. Among the safe moves, pick the one that gets the head closer to the food.",
+    "criteria": {
+      "up": "move up, y decreases by 1",
+      "down": "move down, y increases by 1",
+      "left": "move left, x decreases by 1",
+      "right": "move right, x increases by 1"
+    }
+  }
+}
